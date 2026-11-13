@@ -69,7 +69,8 @@ const layerName = l => t('layer.' + l);
 const CATS = [
   { key: 'hidden_korok', data: 'hidden_koroks', label: t('cat.hidden_korok'), icon: 'korok_hidden', group: t('group.koroks'), size: 20 },
   { key: 'carry_korok', data: 'carry_koroks', label: t('cat.carry_korok'), icon: 'korok_carry', group: t('group.koroks'), size: 22 },
-  { key: 'shrine', data: 'shrines', label: t('cat.shrine'), icon: 'shrine', group: t('group.koroks'), on: true, phone: true },
+  // doneIcon: drawn as the game's map draws it once done (a finished shrine turns blue) instead of faded with a ✓
+  { key: 'shrine', data: 'shrines', label: t('cat.shrine'), icon: 'shrine', doneIcon: 'shrine_done', group: t('group.koroks'), on: true, phone: true },
   { key: 'lightroot', data: 'lightroots', label: t('cat.lightroot'), icon: 'lightroot', group: t('group.koroks'), on: true, phone: true },
   { key: 'cave', data: 'caves', label: t('cat.cave'), icon: 'cave', group: t('group.places'), on: true, phone: true },
   { key: 'bubbul', data: 'bubbuls', label: t('cat.bubbul'), icon: 'bubbul', group: t('group.places'), on: true, phone: true },
@@ -296,9 +297,10 @@ function icon(cat, done, found) {
   const k = cat.key + (done ? ':d' : found ? ':f' : '');
   if (!iconCache[k]) {
     const s = cat.size || 24;
+    const own = done && cat.doneIcon;
     iconCache[k] = L.divIcon({
-      className: 'mk' + (done ? ' done' : found ? ' found' : ''),
-      html: `<img src="${iconSrc(cat.icon)}" alt="">`,
+      className: 'mk' + (own ? ' done-own' : done ? ' done' : found ? ' found' : ''),
+      html: `<img src="${iconSrc(own ? cat.doneIcon : cat.icon)}" alt="">`,
       iconSize: [s, s], iconAnchor: [s / 2, s / 2], popupAnchor: [0, -s / 2],
     });
   }

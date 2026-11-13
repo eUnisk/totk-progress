@@ -19,7 +19,7 @@ import gamefiles
 import maptiles
 from paths import ASSETS
 
-VERSION = 3  # bump when the icon set or its drawing changes: the app then rebuilds it
+VERSION = 4  # bump when the icon set or its drawing changes: the app then rebuilds it
 SIZE = 96  # output px; markers are drawn at 20-24 css px, so this stays sharp on high-dpi screens
 
 # name: (kind, source, colour)
@@ -31,6 +31,8 @@ RECIPES = {
     'korok_hidden': ('ui', 'MapIconKorok^w', None),
     'korok_carry': ('ui', 'MapIconKorok_x2^w', None),
     'shrine': ('mask', 'MapIconDungeon_L_FrameIcon^s', (245, 170, 60)),
+    # a finished shrine: the game's map draws the same icon in blue
+    'shrine_done': ('mask', 'MapIconDungeon_L_FrameIcon^s', (72, 172, 216)),
     'lightroot': ('mask', 'MapIconArrivalPoint_L_FrameIcon^s', (205, 235, 105)),
     'cave': ('ui', 'MapIconCaveM_72x72^w', None),
     'well': ('ui', 'MapIconCaveS_72x72^w', None),
