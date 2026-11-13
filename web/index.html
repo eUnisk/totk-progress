@@ -20,6 +20,7 @@
       <button data-tab="map" class="on" role="tab" data-i18n="tab.map">Map</button>
       <button data-tab="quests" role="tab" data-i18n="tab.quests">Quests</button>
       <button data-tab="outfits" role="tab" data-i18n="tab.outfits">Outfits</button>
+      <button data-tab="ach" role="tab" data-i18n="tab.ach">Achievements</button>
     </div>
   </header>
 
@@ -57,6 +58,9 @@
   <section id="osummary" class="summary view-outfits"></section>
   <section id="outfits" class="quests outfits view-outfits"></section>
 
+  <section id="achsummary" class="ach-summary view-ach"></section>
+  <section id="achs" class="achs view-ach"></section>
+
   <footer class="panel-foot view-map">
     <button id="all-on" class="link" data-i18n="legend.showAll">Show all</button>
     <button id="all-off" class="link" data-i18n="legend.hideAll">Hide all</button>
@@ -68,6 +72,9 @@
   </footer>
   <footer class="panel-foot view-outfits">
     <span class="hint" data-i18n="outfits.hint">★ = upgrade level.</span>
+  </footer>
+  <footer class="panel-foot view-ach">
+    <span class="hint" data-i18n="ach.note">Unlocked as you play.</span>
   </footer>
 </aside>
 
@@ -97,7 +104,9 @@
     <button data-layer="surface" class="on"><img src="/icons/surface.svg" data-icon="surface" alt=""><span data-i18n="layer.surface">Surface</span></button>
     <button data-layer="depths"><img src="/icons/depths.svg" data-icon="depths" alt=""><span data-i18n="layer.depths">Depths</span></button>
     <button id="find-link" class="find-link" title="Where Link was when the game last saved" data-i18n-title="link.title" hidden><img src="/icons/player.svg" data-icon="player" alt=""><span data-i18n="link">Link</span></button>
+    <button id="follow" class="follow" title="Keep the map centred on Link" data-i18n-title="follow.title" hidden><span data-i18n="follow">Follow</span></button>
   </nav>
+  <div id="toasts" class="toasts" aria-live="polite"></div>
   <button id="panel-toggle" class="panel-toggle" aria-label="Toggle panel" data-i18n-aria-label="panel.toggle">☰</button>
   <div id="panel-scrim" class="panel-scrim"></div>
   <div id="map"></div>

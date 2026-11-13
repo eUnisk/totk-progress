@@ -4,6 +4,7 @@ assets/
 *.sav
 # Local settings and logs
 config.json
+achievements.json
 app.log
 __pycache__/
 *.part

@@ -98,6 +98,8 @@ const CATS = [
 ];
 const SKY_Y = 750, DEPTHS_Y = -50, SIZE = 1500;
 const POLL_MS = 4000;
+// Live from the running game (server: sources/): progress every LIVE_MS, Link's position every PLAYER_MS
+const LIVE_MS = 1500, PLAYER_MS = 200;
 
 // View settings (legend, filters, layer, tab, ...) are kept by the app in config.json (/api/prefs), so they
 // survive restarts and a port change, and are the same in the app window and the browser. Read once,
@@ -147,7 +149,10 @@ addEventListener('pagehide', () => store.flush());
 const state = {
   data: null,
   progress: null,
-  slot: store.get('slot', 'latest'),
+  slot: store.get('slot', 'live'),
+  live: null,        // /api/slots .live: {available, error}
+  player: null,      // live position {x, y, z, yaw, heading, source, at} while reading the game
+  follow: store.get('follow', false),
   layer: store.get('layer', 'surface'),
   mode: store.get('mode', 'missing'),
   off: new Set(store.get('off', CATS.filter(c => !(REMOTE ? c.phone : c.on)).map(c => c.key))),
@@ -187,26 +192,43 @@ const map = L.map('map', { crs: L.CRS.Simple, minZoom: -1.5, maxZoom: 3, zoomSna
 const bounds = [[-SIZE, 0], [0, SIZE]];
 const overlays = {};
 // Map built from the game's own map tiles: 12 x 10 tiles of 1000 world units = 125 units in this 1500 px space,
-// rows start 125 px down (z -5000). Two detail levels: 300 px tiles zoomed out, 840 px tiles zoomed in.
+// rows start 125 px down (z -5000). Three detail levels: 300 px tiles zoomed out, 840 px tiles zoomed in, and
+// the game's 3000 px tiles for the closest zoom (as close as the game's own map), each cut into split x split pieces.
 const GameTiles = L.TileLayer.extend({
   // ?v=: a new URL after the tiles are redrawn, so the browser doesn't keep showing cached old tiles
   getTileUrl(c) { return `/assets/tiles/${this.options.layerName}/${this.options.lod}/${c.x}-${c.y - 1}.webp?v=${state.tileStamp}`; },
+});
+// A split level is a tile layer at native zoom log2(split): its pieces are 125 px there too, and the first row of
+// pieces starts `split` pieces down. Piece (x, y) is tile (x / split, (y - split) / split), piece (x % split, ...).
+const SplitTiles = L.TileLayer.extend({
+  getTileUrl(c) {
+    const n = this.options.split, y = c.y - n;
+    return `/assets/tiles/${this.options.layerName}/${this.options.lod}/${Math.floor(c.x / n)}-${Math.floor(y / n)}-${c.x % n}-${y % n}.webp?v=${state.tileStamp}`;
+  },
 });
 // The 840 px tiles are added on top from this zoom on. Switched here, not with the layers' minZoom/maxZoom:
 // Leaflet rounds the zoom before checking those, so with quarter-step zooms both layers could be off at
 // once (e.g. 1.25 rounds to 1) and the map went black in places. The 300 px layer always stays underneath,
 // so there's no gap while detailed tiles load.
 const DETAIL_ZOOM = 1.25;
+// The 3000 px pieces from where the 840 px tiles would start to be stretched (840 = 125 * 2^2.75), up to MAX_ZOOM.
+const FINE_ZOOM = 2.75, MAX_ZOOM = 4;
 function gameTileLayer(name) {
   const common = { layerName: name, tileSize: 125, minNativeZoom: 0, maxNativeZoom: 0, minZoom: -10, maxZoom: 10,
     noWrap: true, bounds: L.latLngBounds([[-1375, 0], [-125, 1500]]), keepBuffer: 4 };
   const far = new GameTiles('', { ...common, lod: '02', zIndex: 1 });
   const near = new GameTiles('', { ...common, lod: '01', zIndex: 2 });
+  const split = state.tileSplit && state.tileSplit['00'];
+  const z = split && Math.log2(split);
+  const fine = split ? new SplitTiles('', { ...common, lod: '00', split, minNativeZoom: z, maxNativeZoom: z, zIndex: 3, keepBuffer: 2 }) : null;
   const group = L.layerGroup([far]);
+  const toggle = (layer, want) => {
+    if (want && !group.hasLayer(layer)) group.addLayer(layer);
+    else if (!want && group.hasLayer(layer)) group.removeLayer(layer);
+  };
   group.syncDetail = () => {
-    const want = map.getZoom() >= DETAIL_ZOOM;
-    if (want && !group.hasLayer(near)) group.addLayer(near);
-    else if (!want && group.hasLayer(near)) group.removeLayer(near);
+    toggle(near, map.getZoom() >= DETAIL_ZOOM);
+    if (fine) toggle(fine, map.getZoom() >= FINE_ZOOM);
   };
   return group;
 }
@@ -215,6 +237,9 @@ async function setupBaseMaps() {
   let meta = null;
   try { meta = await getJSON('/assets/tiles/meta.json'); } catch {}
   state.tileStamp = meta ? (meta.built || meta.version || 1) : 1;
+  // the closest zoom once the 3000 px level is drawn (older installs draw it in the background update)
+  state.tileSplit = meta && (meta.lods || []).includes('00') ? meta.split || null : null;
+  if (state.tileSplit) map.setMaxZoom(MAX_ZOOM);
   // tiles drawn from the player's game files at setup; without them the map stays blank but markers still work
   for (const l of ['surface', 'sky', 'depths']) overlays[l] = gameTileLayer(l);
   state.mapSource = meta ? 'game' : 'none';
@@ -343,26 +368,117 @@ function render() {
   renderPlayer();
 }
 
-// Link's position when the game last saved (PlayerStatus.SavePos), on the layer he's on.
+// Link: where he is right now when reading the running game, else where he was when the game last saved
+// (PlayerStatus.SavePos), on the layer he's on.
 const playerLayer = L.layerGroup().addTo(map);
 let playerMarker = null;
+const isLive = () => !!(state.progress && state.progress.source === 'live');
+const curPlayer = () => (isLive() ? state.player || state.progress.player : state.progress && state.progress.player);
+// In-game coordinates as the game's own map shows them: x, -z and the height above sea level
+const gameCoords = p => `${Math.round(p.x)}, ${Math.round(-p.z)}, ${Math.round(p.y - 106)}`;
+// Where Link is on this map. Inside a shrine the game gives the shrine's own coordinates (on_map false), which
+// mean nothing here: then he is shown as being at that shrine's entrance, and his marker is hidden.
+//   {kind: 'link', pos}            his position
+//   {kind: 'shrine', pos, obj}     in that shrine (pos: its entrance on the map)
+//   {kind: 'away'}                 somewhere not on the map, unknown where
+function linkSpot(p) {
+  if (!p) return null;
+  if (p.on_map !== false) return { kind: 'link', pos: p };
+  const obj = p.shrine && state.data && (state.data.shrines || []).find(s => s.internal_name === p.shrine);
+  return obj ? { kind: 'shrine', pos: obj.position, obj } : { kind: 'away' };
+}
+const SHRINE_CAT = CATS.find(c => c.key === 'shrine');
+const inShrineText = spot => t('player.inShrine', { name: objName(SHRINE_CAT, spot.obj) });
+// Fly to Link, or to the shrine he is in with a note saying so.
+function goToLink(duration) {
+  const spot = linkSpot(curPlayer());
+  if (!spot || !spot.pos) return;
+  if (layerOf(spot.pos.y) !== state.layer) setLayer(layerOf(spot.pos.y));
+  map.flyTo(toLatLng(spot.pos), Math.max(map.getZoom(), 1.5), { duration });
+  setTimeout(() => {
+    if (spot.kind === 'link') { if (playerMarker) playerMarker.openPopup(); }
+    else L.popup({ offset: [0, -12] }).setLatLng(toLatLng(spot.pos))
+      .setContent(`<div class="pop"><h3>${esc(t('link'))}</h3><div class="row">${esc(inShrineText(spot))}</div></div>`).openOn(map);
+  }, duration * 1000 + 100);
+}
+// Link's icon is an arrow pointing up (north, -z) unturned. The live position's `heading` is a map bearing,
+// clockwise from north, so it is the icon's CSS rotation as it is (sources/model.py has the conventions).
+let iconDeg = null;
+function headingDeg(p) {
+  if (p.heading == null) return null;
+  let d = p.heading;
+  if (iconDeg != null) d = iconDeg + ((((d - iconDeg) % 360) + 540) % 360 - 180);   // turn the short way round
+  return d;
+}
+function playerPopup(p) {
+  const live = isLive();
+  const when = !live && state.progress.mtime ? new Date(state.progress.mtime * 1000).toLocaleString(LOCALE) : '';
+  return `<div class="pop"><h3>${esc(t('link'))}</h3><div class="row">${esc(t(live ? 'player.live' : 'player.where'))} · ${esc(layerName(layerOf(p.y)))}</div>
+    ${when ? `<div class="row">${esc(t('player.saved', { when }))}</div>` : ''}<div class="row">${esc(gameCoords(p))}</div></div>`;
+}
 function renderPlayer() {
   playerLayer.clearLayers();
   playerMarker = null;
-  const p = state.progress && state.progress.player;
+  const p = curPlayer(), spot = linkSpot(p);
   $('#find-link').hidden = !p;
-  if (!p || layerOf(p.y) !== state.layer) return;
-  const s = 30;
+  $('#find-link').title = spot && spot.kind === 'shrine' ? inShrineText(spot) : t(isLive() ? 'link.live' : 'link.title');
+  $('#follow').hidden = !p || !isLive();
+  $('#follow').classList.toggle('on', state.follow);
+  if (!p || spot.kind !== 'link' || layerOf(p.y) !== state.layer) return;   // in a shrine: no marker
+  const s = 30, live = isLive();
   playerMarker = L.marker(toLatLng(p), {
-    icon: L.divIcon({ className: 'mk player', html: `<img src="${iconSrc('player')}" alt="">`,
+    icon: L.divIcon({ className: 'mk player' + (live ? ' live' : ''),
+      html: `<img src="${iconSrc('player')}" alt="">`,
       iconSize: [s, s], iconAnchor: [s / 2, s / 2], popupAnchor: [0, -s / 2] }),
     zIndexOffset: 10000, keyboard: false,
   });
-  const when = state.progress.mtime ? new Date(state.progress.mtime * 1000).toLocaleString(LOCALE) : '';
-  playerMarker.bindPopup(`<div class="pop"><h3>${esc(t('link'))}</h3><div class="row">${esc(t('player.where'))} · ${esc(layerName(layerOf(p.y)))}</div>
-    ${when ? `<div class="row">${esc(t('player.saved', { when }))}</div>` : ''}<div class="row">x ${Math.round(p.x)} · y ${Math.round(p.y)} · z ${Math.round(p.z)}</div></div>`);
+  playerMarker.bindPopup(() => playerPopup(curPlayer()));
   playerLayer.addLayer(playerMarker);
+  iconDeg = null;
+  if (live) turnIcon(p);
 }
+// Point Link's icon where he faces. Without a known facing (e.g. the position at the last save) it stays upright.
+function turnIcon(p) {
+  const el = playerMarker && playerMarker.getElement();
+  const img = el && el.querySelector('img');
+  if (!img) return;
+  const d = headingDeg(p);
+  iconDeg = d;
+  img.style.transform = d == null ? '' : `rotate(${d}deg)`;
+}
+// Move Link's marker to the latest live position without redrawing the other ~2,000 markers.
+function updateLivePlayer(p) {
+  const before = linkSpot(state.player);
+  state.player = p;
+  if (!isLive()) return;
+  const spot = linkSpot(p);
+  if (spot.kind !== 'link') {
+    // in a shrine: hide the marker; when following, go to the shrine once, as he goes in
+    const entered = !before || before.kind !== spot.kind || (before.obj !== spot.obj);
+    if (playerMarker || entered) renderPlayer();
+    if (entered && state.follow && spot.pos) goToLink(0.6);
+    return;
+  }
+  const want = layerOf(p.y);
+  if (want !== state.layer && state.follow) { setLayer(want); return; }   // setLayer redraws, Link included
+  const shown = want === state.layer;
+  if (!!playerMarker !== shown) renderPlayer();   // came onto / left the layer on screen
+  else if (playerMarker) {
+    playerMarker.setLatLng(toLatLng(p));
+    turnIcon(p);
+    if (playerMarker.isPopupOpen()) playerMarker.setPopupContent(playerPopup(p));
+  }
+  if (state.follow && shown) map.panTo(toLatLng(p), { animate: true, duration: 0.25, noMoveStart: true });
+}
+let playerBusy = false;
+async function playerTick() {
+  if (!isLive() || playerBusy || document.hidden) return;
+  playerBusy = true;
+  try { updateLivePlayer(await getJSON('/api/live/player')); }
+  catch {}
+  finally { playerBusy = false; }
+}
+setInterval(playerTick, PLAYER_MS);
 
 function renderLegend() {
   const done = state.progress ? state.progress.done : {};
@@ -710,9 +826,11 @@ $('#outfits').addEventListener('toggle', e => {
 }, true);
 
 function setTab(tab) {
+  if (!['map', 'quests', 'outfits', 'ach'].includes(tab)) tab = 'map';
   state.tab = tab; store.set('tab', tab);
   document.body.classList.toggle('tab-quests', tab === 'quests');
   document.body.classList.toggle('tab-outfits', tab === 'outfits');
+  document.body.classList.toggle('tab-ach', tab === 'ach');
   document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
   $('#search').placeholder = t(tab === 'quests' ? 'search.quests' : tab === 'outfits' ? 'search.outfits' : 'search.map');
   $('#search').value = '';
@@ -720,6 +838,120 @@ function setTab(tab) {
   render();
   renderQuests();
   renderOutfits();
+  renderAchievements();
+}
+
+// ---------- achievements ----------
+// Milestones on the collection counts. Each step is its own achievement (`<id>_<n>`, `<id>_all`); the server keeps
+// when each was unlocked (/api/achievements, DATA/achievements.json). Only the running game and the latest save
+// unlock them: looking at an older save never does.
+const BOSSES = ['hinox', 'talus', 'molduga', 'flux_construct', 'frox', 'gleeok'];
+const ACH_DEFS = [
+  { id: 'korok', cats: ['hidden_korok', 'carry_korok'], label: t('sum.korokSeeds'), icon: 'korok_hidden', steps: [1, 10, 50, 100, 250, 500, 750, 'all'] },
+  { id: 'shrine', steps: [1, 10, 25, 50, 100, 'all'] },
+  { id: 'lightroot', steps: [1, 10, 25, 50, 100, 'all'] },
+  { id: 'skyview_tower', steps: [1, 5, 'all'] },
+  { id: 'cave', steps: [1, 25, 50, 100, 'all'] },
+  { id: 'bubbul', steps: [1, 25, 50, 100, 'all'] },
+  { id: 'well', steps: [10, 'all'] },
+  { id: 'chasm', steps: [5, 'all'] },
+  { id: 'location', steps: [50, 150, 250, 'all'] },
+  { id: 'great_fairy', steps: ['all'] },
+  { id: 'dragon_tear', steps: [1, 'all'] },
+  { id: 'sages_will', steps: [5, 'all'] },
+  { id: 'old_map', steps: [10, 'all'] },
+  { id: 'addison_sign', steps: [10, 40, 'all'] },
+  { id: 'schema_stone', steps: ['all'] },
+  { id: 'yiga_schematic', steps: [10, 'all'] },
+  { id: 'armor_chest', steps: [10, 40, 'all'] },
+  { id: 'treasure_chest', steps: [100, 300, 600, 'all'] },
+  { id: 'boss', cats: BOSSES, label: t('ach.bosses'), icon: 'hinox', steps: [1, 10, 50, 100, 'all'] },
+  ...BOSSES.map(k => ({ id: k, steps: ['all'] })),
+  ...['sky', 'surface', 'depths'].map(l => ({ id: 'layer_' + l, layer: l, label: t('ach.layer', { layer: layerName(l) }), icon: l, steps: ['all'] })),
+  { id: 'everything', layer: '*', label: t('ach.total'), icon: 'player', steps: ['all'] },
+].map(d => {
+  const cat = CATS.find(c => c.key === (d.cats ? d.cats[0] : d.id));
+  return { cats: d.layer ? CATS.filter(c => c.track !== false).map(c => c.key) : [d.id], label: cat && cat.label, icon: cat && cat.icon, ...d };
+});
+state.ach = { unlocked: {}, init: false };
+
+function achCounts(d, p) {
+  let n = 0, total = 0;
+  for (const k of d.cats) {
+    const cat = CATS.find(c => c.key === k);
+    const flags = (p && p.done[k]) || [];
+    (state.data[cat.data] || []).forEach((o, i) => {
+      if (d.layer && d.layer !== '*' && layerOf(o.position.y) !== d.layer) return;
+      total++;
+      if (flags[i]) n++;
+    });
+  }
+  return { n, total };
+}
+// [{def, n, total, steps: [{id, target, name, got, met}]}]
+function achList(p) {
+  return ACH_DEFS.map(d => {
+    const { n, total } = achCounts(d, p);
+    const steps = d.steps.filter(s => s === 'all' || s < total).map(s => {
+      const target = s === 'all' ? total : s, id = `${d.id}_${s}`;
+      const name = d.layer ? d.label : t(s === 'all' ? 'ach.all' : 'ach.count', { what: d.label, n: target });
+      return { id, target, name, met: total > 0 && n >= target, got: state.ach.unlocked[id] };
+    });
+    return { def: d, n, total, steps };
+  }).filter(a => a.total > 0);
+}
+// The latest save, or the running game: the progress that can unlock achievements.
+const countsForAch = p => p.source === 'live' || !!(state.slotsInfo && p.slot === state.slotsInfo.latest);
+
+async function checkAchievements(p) {
+  if (!state.data || !countsForAch(p)) { renderAchievements(); return; }
+  const fresh = [];
+  for (const a of achList(p)) for (const s of a.steps) if (s.met && !state.ach.unlocked[s.id]) fresh.push({ ...s, icon: a.def.icon });
+  if (fresh.length) {
+    const now = Math.floor(Date.now() / 1000);
+    for (const s of fresh) state.ach.unlocked[s.id] = now;
+    // the first look this session only catches up silently: what was done before the app was watching
+    if (state.ach.init) fresh.slice(0, 3).forEach((s, i) => setTimeout(() => toast(s), i * 700));
+    if (!REMOTE) {
+      try { state.ach.unlocked = { ...state.ach.unlocked, ...(await post('/api/achievements', { unlock: fresh.map(s => s.id) })) }; }
+      catch {}
+    }
+  }
+  state.ach.init = true;
+  renderAchievements();
+}
+
+function toast(s) {
+  const el = document.createElement('div');
+  el.className = 'toast';
+  el.innerHTML = `<img src="${iconSrc(s.icon)}" alt=""><div><small>${esc(t('ach.unlocked'))}</small><b>${esc(s.name)}</b></div>`;
+  $('#toasts').appendChild(el);
+  setTimeout(() => el.remove(), 6200);
+}
+
+function renderAchievements() {
+  if (!state.data || state.tab !== 'ach') return;
+  const p = state.progress;
+  const list = achList(p);
+  const all = list.flatMap(a => a.steps);
+  const got = all.filter(s => s.got).length;
+  const old = p && !countsForAch(p);
+  $('#achsummary').innerHTML = `<b>${got}</b>${esc(t('ach.summary', { n: got, total: all.length }))}` +
+    (old ? `<div class="note">${esc(t('ach.oldSlot'))}</div>` : '');
+  const q = state.search.trim().toLowerCase();
+  const rows = list.filter(a => !q || a.def.label.toLowerCase().includes(q)).map(a => {
+    const next = a.steps.find(s => !s.got) || a.steps[a.steps.length - 1];
+    const done = a.steps.every(s => s.got);
+    const pct = Math.min(100, (100 * a.n) / (next.target || 1));
+    const last = a.steps.filter(s => s.got).map(s => s.got).sort().pop();
+    const chips = a.steps.map(s => `<span class="${s.got ? 'got' : ''}" title="${esc(s.got ? t('ach.when', { when: new Date(s.got * 1000).toLocaleString(LOCALE) }) : s.name)}">${s.id.endsWith('_all') ? '★' : s.target}</span>`).join('');
+    return `<div class="ach ${done ? 'got' : ''}"><img src="${iconSrc(a.def.icon)}" alt="">
+      <span class="t">${esc(a.def.label)}</span><span class="n">${a.n} / ${done ? a.total : next.target}</span>
+      <span class="bar"><i style="width:${pct.toFixed(1)}%"></i></span>
+      <span class="steps">${chips}</span>
+      ${last ? `<span class="when">${esc(t('ach.when', { when: new Date(last * 1000).toLocaleString(LOCALE) }))}</span>` : ''}</div>`;
+  });
+  $('#achs').innerHTML = rows.length ? rows.join('') : `<div class="empty">${esc(t('ach.none'))}</div>`;
 }
 
 function setStatus(text, cls) { const s = $('#status'); s.textContent = text; s.className = 'status' + (cls ? ' ' + cls : ''); }
@@ -734,31 +966,82 @@ async function getJSON(url) {
 
 async function loadSlots() {
   const s = await getJSON('/api/slots');
+  state.slotsAt = Date.now();
+  state.slotsInfo = s;
+  state.live = s.live || { available: false };
   const sel = $('#slot');
   const cur = state.slot;
-  sel.innerHTML = `<option value="latest">${esc(t('slot.latest', { n: s.latest ?? '–' }))}</option>` +
+  sel.innerHTML = `<option value="live">${esc(t(state.live.available ? 'slot.live' : 'slot.liveOff'))}</option>` +
+    `<option value="latest">${esc(t('slot.latest', { n: s.latest ?? '–' }))}</option>` +
     s.slots.map(x => `<option value="${x.slot}" ${x.error ? 'disabled' : ''}>${esc(t('slot.item', { n: x.slot,
       info: x.error ? t('slot.unreadable') : fmtTime(x.playtime), date: new Date(x.mtime * 1000).toLocaleString(LOCALE) }))}</option>`).join('');
   sel.value = [...sel.options].some(o => o.value === String(cur)) ? String(cur) : 'latest';
   state.slot = sel.value;
   return s;
 }
+// What to show: the running game when "live" is picked and it can be read, else the latest save.
+const wantSlot = () => (state.slot === 'live' ? (state.live && state.live.available ? 'live' : 'latest') : state.slot);
+// Only redraw the map when a flag changed: live progress comes every 1.5 s and redrawing ~2,000 markers
+// each time would close popups and stutter.
+const progressKey = p => JSON.stringify([p.done, p.found, p.quests, p.outfits, p.materials]);
 
 async function loadProgress() {
-  const p = await getJSON('/api/progress?slot=' + encodeURIComponent(state.slot));
+  const want = wantSlot();
+  let p;
+  try {
+    p = await getJSON('/api/progress?slot=' + encodeURIComponent(want));
+  } catch (e) {
+    if (want !== 'live') throw e;
+    state.live = { available: false, error: e.message };   // the game closed or can't be read: show the saves
+    state.liveLostMsg = e.message;
+    p = await getJSON('/api/progress?slot=latest');
+  }
+  const prev = state.progress;
+  const key = progressKey(p);
+  const changed = !prev || prev.source !== p.source || prev.slot !== p.slot || state.progressKey !== key;
   state.progress = p;
+  state.progressKey = key;
   state.lastMtime = p.mtime;
-  renderSummary(); renderLegend(); render(); renderQuests(); renderQuestTargets(); renderOutfits();
-  setStatus(t('status.live', { n: p.slot, time: new Date(p.mtime * 1000).toLocaleTimeString(LOCALE) }), 'live');
+  if (p.source === 'live' && p.player && !state.player) state.player = p.player;
+  if (p.source !== 'live') state.player = null;
+  renderSummary();
+  if (changed) {
+    renderLegend(); render(); renderQuests(); renderQuestTargets(); renderOutfits();
+    if (prev && prev.source === p.source && prev.slot === p.slot) flashNewlyDone(prev, p);
+  }
+  checkAchievements(p);
+  if (p.source === 'live') setStatus(t('status.liveMem', { time: new Date().toLocaleTimeString(LOCALE) }), 'live');
+  else if (state.slot === 'live') setStatus(t('status.liveLost', { error: tMsg(state.liveLostMsg || (state.live && state.live.error) || '') }), 'err');
+  else setStatus(t('status.live', { n: p.slot, time: new Date(p.mtime * 1000).toLocaleTimeString(LOCALE) }), 'live');
+}
+
+// A ring around everything that got done since the last update (a Korok found, a chest opened, ...).
+function flashNewlyDone(prev, p) {
+  for (const cat of CATS) {
+    const before = prev.done[cat.key] || [], now = p.done[cat.key] || [];
+    (state.data[cat.data] || []).forEach((o, i) => {
+      if (!now[i] || before[i] || layerOf(o.position.y) !== state.layer) return;
+      const ring = L.marker(toLatLng(o.position), { icon: L.divIcon({ className: 'flash-ring', iconSize: [40, 40] }),
+        interactive: false, keyboard: false, zIndexOffset: 9000 }).addTo(map);
+      setTimeout(() => map.removeLayer(ring), 4600);
+    });
+  }
 }
 
 async function poll() {
   let again = true;
   try {
-    const s = await loadSlots();
-    const slotNo = state.slot === 'latest' ? s.latest : Number(state.slot);
-    const info = s.slots.find(x => x.slot === slotNo);
-    if (info && (info.mtime !== state.lastMtime || !state.progress || state.progress.slot !== slotNo)) await loadProgress();
+    // live: progress every LIVE_MS, the save list (it reads every save file) only every POLL_MS
+    const s = !state.slotsInfo || state.slot !== 'live' || !state.live || !state.live.available || Date.now() - state.slotsAt >= POLL_MS
+      ? await loadSlots() : state.slotsInfo;
+    if (wantSlot() === 'live') {
+      state.liveLostMsg = null;
+      await loadProgress();
+    } else {
+      const slotNo = state.slot === 'latest' || state.slot === 'live' ? s.latest : Number(state.slot);
+      const info = s.slots.find(x => x.slot === slotNo);
+      if (info && (info.mtime !== state.lastMtime || !state.progress || state.progress.slot !== slotNo)) await loadProgress();
+    }
     // background update of the map data (e.g. first start after an app update)
     if (s.job && s.job.upgrade) {
       if (s.job.running) setStatus(`${tMsg(s.job.message)} ${Math.round(s.job.progress * 100)}%`);
@@ -770,7 +1053,7 @@ async function poll() {
     else if (/setup required/.test(e.message)) { again = false; setStatus(t('status.setup')); openSetup(true); }
     else setStatus(t('status.cannotRead', { error: tMsg(e.message) }), 'err');
   } finally {
-    if (again) setTimeout(poll, POLL_MS);
+    if (again) setTimeout(poll, wantSlot() === 'live' ? LIVE_MS : POLL_MS);
   }
 }
 
@@ -788,13 +1071,17 @@ function setLayer(l) {
 }
 
 document.querySelectorAll('#layers button[data-layer]').forEach(b => b.onclick = () => setLayer(b.dataset.layer));
-$('#find-link').onclick = () => {
-  const p = state.progress && state.progress.player;
-  if (!p) return;
-  if (layerOf(p.y) !== state.layer) setLayer(layerOf(p.y));
-  map.flyTo(toLatLng(p), Math.max(map.getZoom(), 1.5), { duration: 0.8 });
-  setTimeout(() => playerMarker && playerMarker.openPopup(), 900);
+$('#follow').onclick = () => {
+  state.follow = !state.follow; store.set('follow', state.follow);
+  $('#follow').classList.toggle('on', state.follow);
+  if (state.follow) goToLink(0.6);
 };
+map.on('dragstart', () => {   // dragging the map yourself stops following
+  if (!state.follow) return;
+  state.follow = false; store.set('follow', false);
+  $('#follow').classList.remove('on');
+});
+$('#find-link').onclick = () => goToLink(0.8);
 document.querySelectorAll('#mode button').forEach(b => {
   b.classList.toggle('on', b.dataset.mode === state.mode);
   b.onclick = () => {
@@ -805,7 +1092,7 @@ document.querySelectorAll('#mode button').forEach(b => {
 });
 $('#slot').onchange = e => { state.slot = e.target.value; store.set('slot', state.slot); loadProgress().catch(err => setStatus(tMsg(err.message), 'err')); };
 let searchTimer;
-$('#search').oninput = e => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { state.search = e.target.value; render(); renderQuests(); renderOutfits(); }, 150); };
+$('#search').oninput = e => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { state.search = e.target.value; render(); renderQuests(); renderOutfits(); renderAchievements(); }, 150); };
 document.querySelectorAll('#tabs button').forEach(b => b.onclick = () => setTab(b.dataset.tab));
 document.querySelectorAll('#qmode button').forEach(b => {
   b.classList.toggle('on', b.dataset.q === state.qmode);
@@ -1064,6 +1351,7 @@ $('#quit').onclick = async () => {
     state.data = await getJSON('/data/map_data.json');
     try { state.quests = (await getJSON('/data/quests.json')).quests; } catch { state.quests = null; }
     try { const o = await getJSON('/data/outfits.json'); state.outfits = o.sets; state.outfitStamp = o.built || 0; } catch { state.outfits = null; }
+    try { state.ach.unlocked = await getJSON('/api/achievements'); } catch {}
     setTab(state.tab);
     setLayer(state.layer);
     renderLegend(); renderSummary();

@@ -26,6 +26,7 @@ from urllib.parse import parse_qs, urlparse
 
 import gamelang
 import savefile
+from sources import MemorySource, SaveFileSource, SourceUnavailable
 from paths import APP_NAME, ASSETS, CONFIG, DATA, FROZEN, GAME_EXE, LOG, VERSION, WEB, WINDOWS
 
 APP_ID = 'totk-progress-map'
@@ -47,12 +48,14 @@ def have_assets():
 
 
 def tiles_current():
-    """Map tiles drawn by the current tile code (older ones get redrawn)."""
+    """Map tiles drawn by the current tile code (older ones get redrawn), in every detail level the map uses (a level
+    added later, such as 00 for the closest zoom, is drawn in the background update; the others are kept)."""
     import maptiles
     try:
-        return json.loads((ASSETS / 'tiles' / 'meta.json').read_text(encoding='utf-8')).get('version') == maptiles.TILES_VERSION
+        meta = json.loads((ASSETS / 'tiles' / 'meta.json').read_text(encoding='utf-8'))
     except (OSError, ValueError):
         return False
+    return meta.get('version') == maptiles.TILES_VERSION and set(maptiles.LODS) <= set(meta.get('lods') or [])
 
 
 def built_version():
@@ -295,6 +298,8 @@ class State:
         self.map_data = self.quests = self.logic = self.outfits = None
         self.cache = {}
         self.job = {'running': False, 'progress': 0.0, 'message': '', 'error': None, 'done': False}
+        self.live = MemorySource()      # the running game (experimental, see sources/memory_reader.py)
+        self.saves = SaveFileSource()   # the save files; its folder is set by reload()
         self.reload()
 
     def reload(self):
@@ -302,6 +307,7 @@ class State:
         self.install = inspect(self.cfg['install_dir']) if self.cfg.get('install_dir') else None
         sd = self.save_override or (self.install or {}).get('save_dir')
         self.save_dir = Path(sd) if sd else None
+        self.saves = SaveFileSource(self.save_dir)
         mp = ASSETS / 'map_data.json'
         self.map_data = json.loads(mp.read_text(encoding='utf-8')) if mp.is_file() else None
         qfile = ASSETS / 'quests.json'
@@ -501,32 +507,72 @@ class State:
         ok = [s for s in self.slots() if 'error' not in s]
         return max(ok, key=lambda s: (s['mtime'], s['playtime']))['slot'] if ok else None
 
+    def _result(self, snap):
+        """What the page shows for a ProgressSnapshot, from whichever source it came."""
+        result = savefile.progress_from_table(snap.flags, snap.guids, self.map_data)
+        if self.quests:
+            result['quests'] = savefile.quests_from_table(snap.flags, self.quests, self.logic)
+        if self.outfits and snap.inventory is not None:
+            carried, mats = snap.inventory
+            result['outfits'], result['materials'] = savefile.outfits_from_table(snap.flags, carried, mats, self.outfits)
+        return result
+
     def progress(self, slot):
-        f = self.save_dir / f'slot_{slot:02d}' / 'progress.sav'
-        st = f.stat()
+        st = self.saves.path(slot).stat()
         key = (st.st_mtime_ns, st.st_size)
         with self.lock:
             hit = self.cache.get(slot)
             if hit and hit[0] == key:
                 return hit[1]
-        last = None
-        for _ in range(5):  # the game may be writing the file: retry on a torn read
-            try:
-                result = savefile.parse(f, self.map_data)
-                if self.quests:
-                    result['quests'] = savefile.parse_quests(f, self.quests, self.logic)
-                if self.outfits:
-                    result['outfits'], result['materials'] = savefile.parse_outfits(f, self.outfits)
-                break
-            except (savefile.SaveError, struct.error, OSError) as e:
-                last = e
-                time.sleep(0.3)
-        else:
-            raise savefile.SaveError(f'could not read slot {slot}: {last}')
-        result.update(slot=slot, mtime=st.st_mtime)
+        snap = self.saves.progress(slot)
+        result = self._result(snap)
+        p = snap.save_pos
+        result.update(version_id=snap.version_id, player={'x': p.x, 'y': p.y, 'z': p.z} if p else None,
+                      slot=slot, mtime=st.st_mtime, source='save')
         with self.lock:
             self.cache[slot] = (key, result)
         return result
+
+    # ---- the running game: the same result as progress(), live (for now from its memory: sources.memory_source)
+    def live_progress(self):
+        snap = self.live.progress()
+        result = self._result(snap)
+        try:
+            result['player'] = self.live.pose().to_json()
+        except SourceUnavailable:
+            result['player'] = None
+        result.update(slot='live', mtime=snap.at, source='live')
+        # The game's inventory isn't read live yet: the outfits come from the latest save meanwhile.
+        if self.outfits and 'outfits' not in result:
+            latest = self.latest_slot()
+            if latest is not None:
+                saved = self.progress(latest)
+                result.update(outfits=saved.get('outfits'), materials=saved.get('materials'), outfits_source='save')
+        return result
+
+    # ---- achievements unlocked so far ({id: unix time}), kept next to config.json
+    ACHIEVEMENTS = DATA / 'achievements.json'
+
+    def achievements(self):
+        try:
+            data = json.loads(self.ACHIEVEMENTS.read_text(encoding='utf-8'))
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def unlock_achievements(self, ids):
+        if not isinstance(ids, list) or len(ids) > 500 or not all(isinstance(i, str) and 0 < len(i) <= 64 for i in ids):
+            raise ValueError('bad achievement list')
+        with self.lock:
+            data = self.achievements()
+            now = int(time.time())
+            for i in ids:
+                data.setdefault(i, now)
+            DATA.mkdir(parents=True, exist_ok=True)
+            tmp = self.ACHIEVEMENTS.with_suffix('.tmp')
+            tmp.write_text(json.dumps(data, indent=1), encoding='utf-8')
+            os.replace(tmp, self.ACHIEVEMENTS)
+        return data
 
 
 # ---------------------------------------------------------------- folder picker
@@ -738,8 +784,20 @@ def make_handler(state, server_ref, remote=False):
                     self.send_json({'error': 'setup required', 'setup': True}, 409)
                 elif p == '/api/slots':
                     self.send_json({'save_dir': None if remote else str(state.save_dir), 'latest': state.latest_slot(),
-                                    'slots': state.slots(),
+                                    'slots': state.slots(), 'live': state.live.status().to_json(),
                                     'job': state.job})
+                elif p == '/api/live/player':
+                    try:
+                        self.send_json(state.live.pose().to_json())
+                    except SourceUnavailable as e:
+                        self.send_json({'error': str(e)}, 503)
+                elif p == '/api/achievements':
+                    self.send_json(state.achievements())
+                elif p == '/api/progress' and q.get('slot', [''])[0] == 'live':
+                    try:
+                        self.send_json(state.live_progress())
+                    except SourceUnavailable as e:
+                        self.send_json({'error': str(e), 'live': False}, 503)
                 elif p == '/api/progress':
                     slot = q.get('slot', [''])[0]
                     slot = state.latest_slot() if slot in ('', 'latest') else int(slot)
@@ -771,7 +829,8 @@ def make_handler(state, server_ref, remote=False):
         def remote_get_allowed(self, p):
             """Phones and other devices on the network only read: the page, the map data and the progress."""
             if p.startswith('/api/'):
-                return p in ('/api/ping', '/api/setup', '/api/slots', '/api/progress', '/api/prefs', '/api/i18n')
+                return p in ('/api/ping', '/api/setup', '/api/slots', '/api/progress', '/api/prefs', '/api/i18n',
+                             '/api/live/player', '/api/achievements')
             return True
 
         def do_POST(self):
@@ -809,6 +868,8 @@ def make_handler(state, server_ref, remote=False):
                     self.send_json(Updates.set_enabled(state, bool(body.get('enabled'))))
                 elif p == '/api/lang':
                     self.send_json({'ok': True, 'lang': state.set_lang(body.get('lang', 'auto'))})
+                elif p == '/api/achievements':
+                    self.send_json(state.unlock_achievements(body.get('unlock')))
                 elif p == '/api/focus':
                     Ui.focus()
                     self.send_json({'ok': True, 'mode': Ui.mode})

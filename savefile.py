@@ -160,6 +160,11 @@ def parse_quests(path, quests, logic=None):
     """
     buf = Path(path).read_bytes()
     table, _ = read_table(buf)
+    return quests_from_table(table, quests, logic)
+
+
+def quests_from_table(table, quests, logic=None):
+    """parse_quests on a {hash: value} table, from a save file or from the running game (live_memory)."""
     cache = {}
     out = {}
     for q in quests:
@@ -215,6 +220,12 @@ def parse_outfits(path, outfits):
     """
     buf = Path(path).read_bytes()
     table, _ = read_table(buf)
+    carried, mats = read_inventory(buf, table)
+    return outfits_from_table(table, carried, mats, outfits)
+
+
+def read_inventory(buf, table):
+    """(set of armor actors carried, {material actor: count}) from a save's Pouch.Armor / Pouch.Material arrays."""
     carried = set(_array(buf, table, ARMOR_NAMES, _string64, 64))
     names = _array(buf, table, MATERIAL_NAMES, _string64, 64)
     counts = _array(buf, table, MATERIAL_COUNTS, lambda b, o: struct.unpack_from('<i', b, o)[0], 4)
@@ -222,6 +233,11 @@ def parse_outfits(path, outfits):
     for n, c in zip(names, counts):
         if n and c > 0:
             mats[n] = mats.get(n, 0) + c
+    return carried, mats
+
+
+def outfits_from_table(table, carried, mats, outfits):
+    """parse_outfits on a {hash: value} table and an inventory (read_inventory), whichever source they came from."""
     out = {}
     for s in outfits:
         for p in s['pieces']:
@@ -295,7 +311,14 @@ def parse(path, map_data):
     buf = Path(path).read_bytes()
     table, guid_offset = read_table(buf)
     guids = read_guids(buf, guid_offset)
+    result = progress_from_table(table, guids, map_data)
+    result.update(version_id=struct.unpack_from('<I', buf, 4)[0], player=player_position(buf, table))
+    return result
 
+
+def progress_from_table(table, guids, map_data):
+    """The done / found flags per category from a {hash: value} table and a set of done GUIDs: the part of
+    parse() shared by save files and the running game (live_memory)."""
     done = {}
     for cat, (key, rule) in CATEGORIES.items():
         flags = []
@@ -321,9 +344,7 @@ def parse(path, map_data):
     found = {'shrine': [table.get(o['completion_hash']) in (STATUS_OPEN, STATUS_ENTER) for o in map_data.get('shrines', [])]}
 
     return {
-        'version_id': struct.unpack_from('<I', buf, 4)[0],
         'playtime': table.get(PLAYTIME_HASH, 0),
-        'player': player_position(buf, table),
         'done': done,
         'found': found,
     }

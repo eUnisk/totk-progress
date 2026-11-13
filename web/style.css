@@ -90,6 +90,48 @@ select, input[type=search] {
 .layers button[hidden] { display: none; }
 .layers .find-link { border-left: 1px solid var(--line); border-radius: 0 999px 999px 0; }
 .mk.player img { transform: none; filter: drop-shadow(0 0 4px rgba(255, 214, 64, .9)); }
+.layers .follow { border-left: 1px solid var(--line); border-radius: 0 999px 999px 0; }
+.layers .find-link:has(+ .follow:not([hidden])) { border-radius: 0; }
+/* live position: Link's arrow icon turns to where he faces (app.js turnIcon) and glides between positions */
+.mk.player.live img { transition: transform .2s linear; }
+.leaflet-marker-icon.mk.player { transition: transform .2s linear; }
+.leaflet-zoom-anim .leaflet-marker-icon.mk.player { transition: none; }
+/* newly done while you watch */
+.flash-ring { border-radius: 50%; border: 3px solid var(--done); animation: flash-ring 1.1s ease-out 4; pointer-events: none; }
+@keyframes flash-ring { 0% { transform: scale(.4); opacity: 1; } 100% { transform: scale(1.6); opacity: 0; } }
+/* achievements */
+.ach-summary { padding: 10px 16px 4px; color: var(--muted); font-size: 13px; }
+.ach-summary b { color: var(--text); font-size: 20px; margin-right: 6px; }
+.ach-summary .note { font-size: 12px; margin-top: 6px; color: #e3c27a; }
+.achs { flex: 1; overflow-y: auto; padding: 4px 8px 12px; }
+.achs h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 12px 8px 6px; }
+.ach { display: grid; grid-template-columns: 28px 1fr auto; gap: 4px 10px; align-items: center; padding: 7px 8px;
+  border-radius: 8px; }
+.ach img { width: 24px; height: 24px; opacity: .45; filter: grayscale(1); }
+.ach .t { font-size: 13px; color: var(--muted); }
+.ach .n { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.ach .bar { grid-column: 2 / 4; height: 3px; background: var(--panel-2); border-radius: 2px; overflow: hidden; }
+.ach .bar i { display: block; height: 100%; background: var(--accent); }
+.ach .when { grid-column: 2 / 4; font-size: 11px; color: var(--muted); }
+.ach .steps { grid-column: 2 / 4; display: flex; flex-wrap: wrap; gap: 4px; }
+.ach .steps span { font-size: 10.5px; padding: 0 6px; border-radius: 999px; border: 1px solid var(--line);
+  color: var(--muted); font-variant-numeric: tabular-nums; }
+.ach .steps span.got { border-color: var(--done); color: var(--done); }
+.layers .follow.on { background: var(--line); color: var(--text); }
+.ach.got img { opacity: 1; filter: none; }
+.ach.got .t { color: var(--text); }
+.ach.got .n { color: var(--done); }
+.ach.got .bar i { background: var(--done); }
+.toasts { position: absolute; z-index: 1200; top: 64px; left: 50%; transform: translateX(-50%); display: flex;
+  flex-direction: column; gap: 8px; align-items: center; pointer-events: none; }
+.toast { display: flex; gap: 10px; align-items: center; background: rgba(26,32,38,.96); border: 1px solid #e3c27a;
+  border-radius: 12px; padding: 8px 14px 8px 10px; box-shadow: 0 4px 18px rgba(0,0,0,.6);
+  animation: toast-in .35s ease-out, toast-out .5s ease-in 5.5s forwards; }
+.toast img { width: 28px; height: 28px; }
+.toast small { display: block; color: #e3c27a; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
+.toast b { font-size: 14px; }
+@keyframes toast-in { from { transform: translateY(-12px); opacity: 0; } }
+@keyframes toast-out { to { transform: translateY(-12px); opacity: 0; } }
 .panel-toggle { display: none; }
 .panel-close, .panel-scrim { display: none; }
 
@@ -176,8 +218,8 @@ select, input[type=search] {
 .tabs { display: flex; gap: 4px; margin-top: 10px; }
 .tabs button { flex: 1; background: none; border: 1px solid var(--line); border-radius: 8px; padding: 6px 0; color: var(--muted); }
 .tabs button.on { background: var(--panel-2); color: var(--text); border-color: var(--accent); }
-body:not(.tab-quests) .view-quests, body:not(.tab-outfits) .view-outfits,
-body.tab-quests .view-map, body.tab-outfits .view-map { display: none !important; }
+body:not(.tab-quests) .view-quests, body:not(.tab-outfits) .view-outfits, body:not(.tab-ach) .view-ach,
+body.tab-quests .view-map, body.tab-outfits .view-map, body.tab-ach .view-map { display: none !important; }
 .seg4 { grid-template-columns: repeat(4, 1fr); }
 .check { display: flex; gap: 8px; align-items: center; color: var(--muted); font-size: 12px; cursor: pointer; }
 .panel-foot.view-quests { flex-direction: column; align-items: flex-start; gap: 6px; }
