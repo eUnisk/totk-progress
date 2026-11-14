@@ -4,3 +4,5 @@ pillow>=10
 pywebview>=5
 segno>=1.5
 certifi
+# live tracking (this fork): the running game's data, see README
+totk-live-bridge @ git+https://github.com/eUnisk/totk-live-bridge@v0.1.0

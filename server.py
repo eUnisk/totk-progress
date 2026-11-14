@@ -26,7 +26,7 @@ from urllib.parse import parse_qs, urlparse
 
 import gamelang
 import savefile
-from sources import MemorySource, SaveFileSource, SourceUnavailable
+from sources import LiveSource, SaveFileSource, SourceUnavailable, start_bridge
 from paths import APP_NAME, ASSETS, CONFIG, DATA, FROZEN, GAME_EXE, LOG, VERSION, WEB, WINDOWS
 
 APP_ID = 'totk-progress-map'
@@ -298,7 +298,7 @@ class State:
         self.map_data = self.quests = self.logic = self.outfits = None
         self.cache = {}
         self.job = {'running': False, 'progress': 0.0, 'message': '', 'error': None, 'done': False}
-        self.live = MemorySource()      # the running game (experimental, see sources/memory_reader.py)
+        self.live = LiveSource()        # the running game, through its control socket or totk-live-bridge
         self.saves = SaveFileSource()   # the save files; its folder is set by reload()
         self.reload()
 
@@ -533,7 +533,7 @@ class State:
             self.cache[slot] = (key, result)
         return result
 
-    # ---- the running game: the same result as progress(), live (for now from its memory: sources.memory_source)
+    # ---- the running game: the same result as progress(), live (sources.control_source)
     def live_progress(self):
         snap = self.live.progress()
         result = self._result(snap)
@@ -1020,6 +1020,8 @@ def main():
     if state.cfg.get('lan') and args.host == '127.0.0.1':
         Lan.start(state)
     Updates.start(state)
+    if state.cfg.get('bridge', True):   # "bridge": false in config.json: only use a socket that is already running
+        print(start_bridge())
     print(f'Serving {url}', flush=True)
     if args.no_browser:
         serve(srv)

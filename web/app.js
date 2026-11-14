@@ -33,6 +33,9 @@ const SERVER_PATTERNS = [
   [/^map data: /, () => tMsg('Finding shrines, Koroks and everything else in your game files…')],
   [/^outfits: /, () => tMsg('Finding every outfit and where to get it…')],
   [/^could not read slot (\d+): (.*)$/s, m => t('msg.slot', { n: m[1], error: m[2] })],
+  [/^totk-live-bridge (\S+) speaks protocol (\S+), this app reads protocol (\d+): update (this app|totk-live-bridge)/,
+    m => t(m[4] === 'this app' ? 'msg.bridgeNewer' : 'msg.bridgeOlder', { version: m[1] })],
+  [/^unsupported game build .*; live reading is made for (.*)$/s, m => t('msg.unsupportedBuild', { supported: m[1] })],
 ];
 function tMsg(s) {
   if (!s) return s;

@@ -4,6 +4,21 @@
 
 ![The map: what's still missing around Link's last save, with Korok puzzle routes](docs/screenshots/map.webp)
 
+> **About this fork (eUnisk/totk-progress, branch `live-tracking`).** It adds **live tracking** on top of
+> TotK Progress Map: Link's position and facing, finished shrines, collectibles, quests and outfits update as you
+> play, without waiting for the game to save, plus an Achievements tab and toasts for what you just finished.
+>
+> The app reads the running game only through a *control socket*: TotK Recomp's own read-only socket for companion
+> apps ([PR #1148](https://github.com/valentderah/totk-pc-recomp/pull/1148)) and, for what that doesn't answer yet
+> (flags, inventory, shrine), [totk-live-bridge](https://github.com/eUnisk/totk-live-bridge), which reads the game's
+> memory (read-only) and answers in the same protocol. The bridge is a stopgap: installed with this app
+> (`requirements.txt`) and started inside it on `127.0.0.1:7778`. It supports TotK 1.4.3 on Windows; with any other
+> game build it reads nothing and the app shows your saves as before. The official socket takes over by itself for
+> whatever it answers. `"bridge": false` in `config.json` turns the built-in bridge off.
+>
+> Not part of upstream; nothing here is endorsed by the TotK Progress Map author. Made with an AI assistant
+> (Claude Opus 5.5 in Claude Code) under my supervision, and checked against the running game.
+
 A companion app for [TotK Recomp](https://github.com/valentderah/totk-pc-recomp), the native PC port of *Tears of the Kingdom*.
 It reads your save and shows what you have and haven't
 found on the map: Korok seeds (with their puzzle paths), shrines (including ones you found but haven't
