@@ -89,7 +89,7 @@ class SaveFileSourceTest(unittest.TestCase):
     def test_snapshot(self):
         src = SaveFileSource(self.dir)
         self.assertTrue(src.status().available)
-        self.assertEqual(src.capabilities, Capability.PROGRESS)
+        self.assertEqual(src.capabilities, Capability.PROGRESS | Capability.INVENTORY)
         snap = src.progress(2)
         self.assertIsInstance(snap, ProgressSnapshot)
         # plus PlayerStatus.SavePos, whose value is the offset of its three floats, as in savefile.read_table
@@ -122,8 +122,10 @@ class SaveFileSourceTest(unittest.TestCase):
 
 
 class FakeReader:
-    def __init__(self, pos=(101.58, 1497.41, 1549.08), rot=turn(-38.5), scene='MainField', fail=None):
+    def __init__(self, pos=(101.58, 1497.41, 1549.08), rot=turn(-38.5), scene='MainField', fail=None,
+                 inventory_fail=None):
         self.pos, self.rot, self._scene, self.fail, self.error = pos, rot, scene, fail, fail
+        self.inventory_fail = inventory_fail
 
     def player(self):
         if self.fail:
@@ -139,6 +141,11 @@ class FakeReader:
         if self.fail:
             raise LiveError(self.fail)
         return {savefile.PLAYTIME_HASH: 8360}, {1, 2}
+
+    def inventory(self):
+        if self.fail or self.inventory_fail:
+            raise LiveError(self.fail or self.inventory_fail)
+        return {'Armor_001_Head'}, {'Item_Fruit_A': 5}
 
     def status(self):
         return {'available': not self.fail, 'pid': None if self.fail else 1, 'error': self.fail}
@@ -171,12 +178,18 @@ class MemorySourceTest(unittest.TestCase):
                 call()
         st = src.status()
         self.assertFalse(st.available)
-        self.assertEqual(st.to_json()['capabilities'], ['pose', 'state', 'progress'])
+        self.assertEqual(st.to_json()['capabilities'], ['pose', 'state', 'progress', 'inventory'])
         self.assertTrue(st.to_json()['experimental'])
 
     def test_progress(self):
         snap = MemorySource(FakeReader()).progress()
         self.assertEqual((snap.playtime, snap.guids, snap.slot, snap.source), (8360, frozenset({1, 2}), None, 'memory'))
+        self.assertEqual(snap.inventory, (frozenset({'Armor_001_Head'}), {'Item_Fruit_A': 5}))
+
+    def test_progress_without_inventory(self):
+        # the flags still come through; the app then takes the outfits from the latest save
+        snap = MemorySource(FakeReader(inventory_fail='array missing')).progress()
+        self.assertEqual((snap.playtime, snap.inventory), (8360, None))
 
 
 if __name__ == '__main__':

@@ -542,7 +542,7 @@ class State:
         except SourceUnavailable:
             result['player'] = None
         result.update(slot='live', mtime=snap.at, source='live')
-        # The game's inventory isn't read live yet: the outfits come from the latest save meanwhile.
+        # When the game's inventory couldn't be read, the outfits come from the latest save.
         if self.outfits and 'outfits' not in result:
             latest = self.latest_slot()
             if latest is not None:

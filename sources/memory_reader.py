@@ -23,6 +23,11 @@ GameData (the flags the game writes to progress.sav):
         Float (table 4)  stride 40  f32 at +0x1C
         Enum  (table 6)  stride 56  u32 at +0x1C (murmur3 of the enum value's name)
         UInt  (table 20) stride 40  u32 at +0x1C
+    array tables: an entry holds {u64 length, items*} twice; both follow the game (an apple eaten changes
+        both before any save), the reader takes the first
+        Int array      (table 3)   stride 0x40, arrays at +0x20  items: s32
+        String64 array (table 17)  stride 0x90, arrays at +0x70  items: 0x50 bytes {char *text, u32 capacity,
+                                                                 char text[64]}
     R + 0xc58: count, R + 0xc60: array of {u64 guid, u64 attributes} sorted by guid; attribute bit 32 set =
     the object's flag is on (opened chest, read sign, ...): the same set as the GUID array of progress.sav.
 
@@ -51,7 +56,15 @@ SCALAR_TABLES = {
     20: ('UInt', 40, 0x1C, 'I'),
 }
 # vtables of the tables above in this build: a different game or recomp build has other addresses
-EXPECTED_VTABLES = {0: 0x70039403d0, 2: 0x7003940510, 4: 0x7003940650, 6: 0x7003940790, 20: 0x7003941050}
+EXPECTED_VTABLES = {0: 0x70039403d0, 2: 0x7003940510, 3: 0x70039405b0, 4: 0x7003940650, 6: 0x7003940790,
+                    17: 0x7003940e70, 20: 0x7003941050}
+# array tables: index -> (name, entry stride, offset of the current {length, items*}, item size)
+INT_ARRAY, STRING64_ARRAY = 3, 17
+ARRAY_TABLES = {INT_ARRAY: ('Int array', 0x40, 0x20, 4), STRING64_ARRAY: ('String64 array', 0x90, 0x70, 0x50)}
+STRING64_TEXT = 12      # where the text of a String64 item starts
+MAX_ARRAY = 4096
+# the inventory arrays (murmur3 of Pouch.Armor.Content.Name, Pouch.Material.Content.Name / .StockNum)
+ARMOR_NAMES, MATERIAL_NAMES, MATERIAL_COUNTS = 0x754e8549, 0xd96ebf12, 0xde2d8500
 GUID_SET_BIT = 1 << 32
 PLAYTIME_HASH = 0xE573F564
 # (static offset in main, offsets added after each dereference) -> Vec3f position, then 3x3 rotation
@@ -205,8 +218,8 @@ class LiveReader:
                 raise LiveError(self.error) from e
 
     # ---- game data
-    def _table(self, p, root, ti):
-        name, stride, voff, fmt = SCALAR_TABLES[ti]
+    def _index(self, p, root, ti, name):
+        """(entries*, entry count, {hash: entry index}) of table ti; the hash map is read again only when it moved."""
         cnt, ent, hm, capcnt = struct.unpack('<4Q', p.read(root + TABLE_BASE + TABLE_SIZE * ti + 8, 32))
         cap = capcnt >> 32
         if not (0 < cnt < 200000 and cnt <= cap < 400000):
@@ -220,10 +233,15 @@ class LiveReader:
                 if (h or idx) and idx < cnt:
                     index[h] = idx
             self.maps[ti] = cached = (key, index)
+        return ent, cnt, cached[1]
+
+    def _table(self, p, root, ti):
+        name, stride, voff, fmt = SCALAR_TABLES[ti]
+        ent, cnt, index = self._index(p, root, ti, name)
         entries = p.read(ent, stride * cnt)
         out = {}
         unpack = struct.Struct('<' + fmt).unpack_from
-        for h, idx in cached[1].items():
+        for h, idx in index.items():
             v = unpack(entries, stride * idx + voff)[0]
             if fmt == 'f':
                 v = struct.unpack('<I', struct.pack('<f', v))[0]   # as in the save: the float's bits
@@ -246,6 +264,38 @@ class LiveReader:
             raw = p.read(p.u64(root + GUID_ARRAY_OFF), 16 * n)
             guids = {g for g, a in struct.iter_unpack('<QQ', raw) if a & GUID_SET_BIT}
             return table, guids
+        return self._call(read)
+
+    def _array(self, p, root, ti, h):
+        """The current items of array h in table ti: ints, or the texts of String64 items."""
+        name, stride, aoff, size = ARRAY_TABLES[ti]
+        ent, _, index = self._index(p, root, ti, name)
+        if h not in index:
+            raise LiveError(f'array {h:#010x} missing from the {name} table')
+        n, items = struct.unpack('<QQ', p.read(ent + stride * index[h] + aoff, 16))
+        if not 0 < n <= MAX_ARRAY:
+            raise LiveError(f'array {h:#010x} looks wrong (length {n})')
+        raw = p.read(items, size * n)
+        if ti == INT_ARRAY:
+            return list(struct.unpack(f'<{n}i', raw))
+        out = []
+        for i in range(n):
+            text = raw[size * i + STRING64_TEXT:size * (i + 1)].split(b'\0', 1)[0]
+            out.append(text.decode('utf-8', 'replace'))
+        return out
+
+    def inventory(self):
+        """(set of armor actors carried, {material actor: count}) as savefile.read_inventory gives for a save."""
+        def read(p):
+            root = self._root(p)
+            carried = {a for a in self._array(p, root, STRING64_ARRAY, ARMOR_NAMES) if a}
+            names = self._array(p, root, STRING64_ARRAY, MATERIAL_NAMES)
+            counts = self._array(p, root, INT_ARRAY, MATERIAL_COUNTS)
+            mats = {}
+            for n, c in zip(names, counts):
+                if n and c > 0:
+                    mats[n] = mats.get(n, 0) + c
+            return carried, mats
         return self._call(read)
 
     # ---- Link
@@ -311,6 +361,8 @@ if __name__ == '__main__':   # quick check: python -m sources.memory_reader
     table, guids = r.snapshot()
     print(f'{len(table)} flags, {len(guids)} GUIDs set, play time {table.get(PLAYTIME_HASH)} s '
           f'({(time.perf_counter() - t0) * 1000:.0f} ms)')
+    carried, mats = r.inventory()
+    print(f'inventory: {len(carried)} armor pieces, {len(mats)} materials')
     for _ in range(3):
         print(r.player())
         time.sleep(0.5)

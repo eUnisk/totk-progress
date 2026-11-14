@@ -25,6 +25,7 @@ class Capability(enum.Flag):
     POSE = enum.auto()       # Link's live position (and facing, when known)
     STATE = enum.auto()      # versions, whether a save is loaded, game time
     PROGRESS = enum.auto()   # the GameData flags and the set GUIDs that say what is done
+    INVENTORY = enum.auto()  # what Link carries (armor, materials): ProgressSnapshot.inventory
 
 
 class SourceUnavailable(Exception):
@@ -106,7 +107,7 @@ class ProgressSnapshot:
     save_pos: where Link was at the save (a save file only; the running game reports a live Pose instead)
     slot: the save slot it came from, or None for the running game
     inventory: (frozenset of armor actors carried, {material actor: count}) as savefile.read_inventory, or None
-        when the source can't read the inventory (the running game, for now)
+        when the source can't read the inventory
     """
     flags: dict
     guids: frozenset

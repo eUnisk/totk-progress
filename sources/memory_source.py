@@ -9,7 +9,7 @@ from .model import Capability, GameSource, GameState, Pose, ProgressSnapshot, So
 
 class MemorySource(GameSource):
     name = 'memory'
-    capabilities = Capability.POSE | Capability.STATE | Capability.PROGRESS
+    capabilities = Capability.POSE | Capability.STATE | Capability.PROGRESS | Capability.INVENTORY
     experimental = True
 
     def __init__(self, reader=None):
@@ -49,4 +49,9 @@ class MemorySource(GameSource):
             flags, guids = self.reader.snapshot()
         except LiveError as e:
             raise SourceUnavailable(str(e)) from e
-        return ProgressSnapshot(flags, frozenset(guids), source=self.name)
+        try:   # the progress doesn't need it: without it the app shows the outfits of the latest save
+            carried, mats = self.reader.inventory()
+            inventory = (frozenset(carried), mats)
+        except LiveError:
+            inventory = None
+        return ProgressSnapshot(flags, frozenset(guids), source=self.name, inventory=inventory)

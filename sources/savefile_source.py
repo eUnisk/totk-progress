@@ -10,7 +10,7 @@ from .model import Capability, GameSource, Pose, ProgressSnapshot, SourceStatus,
 
 class SaveFileSource(GameSource):
     name = 'save'
-    capabilities = Capability.PROGRESS
+    capabilities = Capability.PROGRESS | Capability.INVENTORY
 
     def __init__(self, save_dir=None):
         self.save_dir = Path(save_dir) if save_dir else None
