@@ -198,13 +198,42 @@ const overlays = {};
 // Map built from the game's own map tiles: 12 x 10 tiles of 1000 world units = 125 units in this 1500 px space,
 // rows start 125 px down (z -5000). Three detail levels: 300 px tiles zoomed out, 840 px tiles zoomed in, and
 // the game's 3000 px tiles for the closest zoom (as close as the game's own map), each cut into split x split pieces.
+// Seams: at quarter-step zooms Leaflet scales the tiles by a fraction (0.35 at the farthest zoom), their edges fall
+// between screen pixels and show as a faint grid (Leaflet 1.9's own fix, adding the tiles up with mix-blend-mode:
+// plus-lighter, only works at whole zooms). Instead each tile is drawn larger by one screen pixel at the current
+// zoom, so it overlaps its neighbours; that one pixel is all it stretches, too little to see.
+const SEAMLESS = {
+  _seamFit(tile) {
+    const scale = this._map ? this._map.getZoomScale(this._map.getZoom(), this._tileZoom) : 1;
+    const extra = 1 / Math.max(scale, 0.25);   // tile pixels covering one screen pixel
+    const s = this.getTileSize();
+    tile.style.width = `${s.x + extra}px`;
+    tile.style.height = `${s.y + extra}px`;
+  },
+  _initTile(tile) {
+    L.TileLayer.prototype._initTile.call(this, tile);
+    tile.style.mixBlendMode = 'normal';   // overlapping tiles added up would make bright lines
+    this._seamFit(tile);
+  },
+  getEvents() {
+    const events = L.TileLayer.prototype.getEvents.call(this);
+    const zoomend = events.zoomend;
+    events.zoomend = function () {   // the tiles stay while the scale changes within a native zoom: refit them
+      if (zoomend) zoomend.apply(this, arguments);
+      for (const key in this._tiles) this._seamFit(this._tiles[key].el);
+    };
+    return events;
+  },
+};
 const GameTiles = L.TileLayer.extend({
+  ...SEAMLESS,
   // ?v=: a new URL after the tiles are redrawn, so the browser doesn't keep showing cached old tiles
   getTileUrl(c) { return `/assets/tiles/${this.options.layerName}/${this.options.lod}/${c.x}-${c.y - 1}.webp?v=${state.tileStamp}`; },
 });
 // A split level is a tile layer at native zoom log2(split): its pieces are 125 px there too, and the first row of
 // pieces starts `split` pieces down. Piece (x, y) is tile (x / split, (y - split) / split), piece (x % split, ...).
 const SplitTiles = L.TileLayer.extend({
+  ...SEAMLESS,
   getTileUrl(c) {
     const n = this.options.split, y = c.y - n;
     return `/assets/tiles/${this.options.layerName}/${this.options.lod}/${Math.floor(c.x / n)}-${Math.floor(y / n)}-${c.x % n}-${y % n}.webp?v=${state.tileStamp}`;
